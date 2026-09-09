@@ -35,4 +35,7 @@ int fq_push(frame_queue *fq, const void *data, size_t size);
  * 成功返回 0，超时（队列空）返回 -1。 */
 int fq_pop(frame_queue *fq, void *out, size_t *size, int timeout_ms);
 
+/* 查询队列的帧大小（字节），供 cap_start 校验队列与采集格式是否匹配 */
+size_t fq_frame_size(const frame_queue *fq);
+
 #endif /* FRAME_QUEUE_H_ */

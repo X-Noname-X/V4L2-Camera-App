@@ -54,6 +54,11 @@ void fq_destroy(frame_queue *fq)
     free(fq);
 }
 
+size_t fq_frame_size(const frame_queue *fq)
+{
+    return fq ? fq->frame_size : 0;
+}
+
 int fq_push(frame_queue *fq, const void *data, size_t size)
 {
     if (!fq || !data || size != fq->frame_size) return -1;
