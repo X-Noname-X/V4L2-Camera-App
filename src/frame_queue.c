@@ -76,7 +76,7 @@ int fq_push(frame_queue *fq, const void *data, size_t size)
     memcpy(fq->buf + offset, data, size);
     fq->head++;
     fq->count++;
-    pthread_cond_signal(&fq->not_empty);  // 唤醒可能在等空的消费者 ??
+    pthread_cond_signal(&fq->not_empty);  // 唤醒可能在等空的消费者：对应fq_pop中的pthread_cond_wait和pthread_cond_timedwait
     pthread_mutex_unlock(&fq->lock);
     return 0;
 }
@@ -86,7 +86,7 @@ int fq_pop(frame_queue *fq, void *out, size_t *size, int timeout_ms)
     if (!fq || !out || !size || *size < fq->frame_size) return -1;
     pthread_mutex_lock(&fq->lock);
     while(fq->count == 0){
-        if (timeout_ms < 0) pthread_cond_wait(&fq->not_empty, &fq->lock);
+        if (timeout_ms < 0) pthread_cond_wait(&fq->not_empty, &fq->lock); // 1. 释放 fq->lock（把锁交出去）； 2. 当前线程睡着，等 fq->not_empty 被 signal
         else if (timeout_ms == 0){
             pthread_mutex_unlock(&fq->lock);
             return -1;
@@ -100,6 +100,8 @@ int fq_pop(frame_queue *fq, void *out, size_t *size, int timeout_ms)
                 ts.tv_sec++;
                 ts.tv_nsec -= 1000000000L;
             }
+            // 和pthread_cond_wait一样，只不过pthread_cond_wait会无限等，函数pthread_cond_timedwait只等timeout_ms时间就自己醒
+            // 两者都会在睡眠时原子地放掉锁、醒来时拿回锁
             int rc = pthread_cond_timedwait(&fq->not_empty, &fq->lock, &ts);
             if (rc == ETIMEDOUT) {             /* 真超时了 */
                 pthread_mutex_unlock(&fq->lock);
