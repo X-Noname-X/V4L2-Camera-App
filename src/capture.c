@@ -19,7 +19,7 @@ struct capture{
     void **buffers;        // 每块 mmap 出的缓冲区的起始地址
     size_t *buffer_sizes;  // 每块缓冲区的长度
     frame_queue *fq;   // cap_start 指定的目标队列
-    pthread_t thread;
+    pthread_t thread;  // 线程句柄
     int running;  // 线程退出标志
 };
 

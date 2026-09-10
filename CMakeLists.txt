@@ -15,6 +15,7 @@ find_package(JPEG QUIET)   # libjpeg(-turbo)：可选，用于 MJPEG 解码
 add_library(camera STATIC
     src/frame_queue.c
     src/decoder.c
+    src/sinks/sink_null.c
 )
 target_include_directories(camera PUBLIC include)
 target_link_libraries(camera PUBLIC Threads::Threads)
@@ -42,10 +43,18 @@ add_executable(test_capture
 )
 target_link_libraries(test_capture PRIVATE camera)
 
+add_executable(test_sink tests/unit/test_sink.c)
+target_link_libraries(test_sink PRIVATE camera)
+
 add_test(NAME frame_queue COMMAND test_frame_queue)
 add_test(NAME decoder COMMAND test_decoder)
 add_test(NAME capture COMMAND test_capture)
+add_test(NAME sink COMMAND test_sink)
 
-# 可执行程序：真采集 + 核心库（待 sink 模块就绪后再启用）
-# add_executable(camera_app apps/main.c src/capture.c)
-# target_link_libraries(camera_app PRIVATE camera)
+# 可执行程序：demo 版用 mock 采集 + null 显示，无硬件依赖。
+# 之后接真摄像头：把 tests/unit/mock_capture.c 换成 src/capture.c 即可。
+add_executable(camera_app
+    apps/main.c
+    tests/unit/mock_capture.c
+)
+target_link_libraries(camera_app PRIVATE camera)
