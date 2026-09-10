@@ -70,16 +70,29 @@ capture *cap_create(const capture_config *cfg)
     cap->fd = open(cfg->device, O_RDWR);   /* 阻塞模式：DQBUF 会阻塞等帧，STREAMOFF 时返回错误退出 */
     if (cap->fd < 0) { perror("open"); goto fail; }
 
-    /* 2. 确认是视频采集设备 */
+    /* 2. 确认是视频采集设备，且支持流式 I/O */
     struct v4l2_capability capability;
     memset(&capability, 0, sizeof(capability));
     if (xioctl(cap->fd, VIDIOC_QUERYCAP, &capability, "VIDIOC_QUERYCAP") < 0) goto fail;
-    if (capability.capabilities & V4L2_CAP_DEVICE_CAPS) {
-        if (capability.device_caps & V4L2_CAP_VIDEO_CAPTURE)
-            printf("[%s] 支持视频捕获\n", cfg->device);
-        if (capability.device_caps & V4L2_CAP_STREAMING)
-            printf("[%s] 支持流式输入输出\n", cfg->device);
+
+    /* 新驱动在 device_caps 里给出「这个 video 节点自己」的能力，比 capabilities
+     * （整个硬件设备的总能力）准确：一个摄像头可能同时导出采集节点和 metadata
+     * 节点，看总能力会误判。老驱动没有 DEVICE_CAPS 时才退回用 capabilities。 */
+    unsigned caps = (capability.capabilities & V4L2_CAP_DEVICE_CAPS)
+                  ? capability.device_caps
+                  : capability.capabilities;
+
+    /* 这两项是硬性依赖：缺了后面要么 S_FMT 报 EINVAL，要么 QBUF/DQBUF 用不了。
+     * 在这里就拦下，免得带着不合适的设备一路走到深处才失败、错误信息还看不懂。 */
+    if (!(caps & V4L2_CAP_VIDEO_CAPTURE)) {
+        fprintf(stderr, "%s 不是视频采集设备\n", cfg->device);
+        goto fail;
     }
+    if (!(caps & V4L2_CAP_STREAMING)) {
+        fprintf(stderr, "%s 不支持流式 I/O（QBUF/DQBUF 用不了）\n", cfg->device);
+        goto fail;
+    }
+    printf("[%s] 支持视频捕获 + 流式输入输出\n", cfg->device);
 
     /* 3. 设置格式。S_FMT 成功后 fmt 会被驱动改成实际支持的格式，
      *    直接读回即可，不必再单独 VIDIOC_G_FMT。 */

@@ -8,6 +8,9 @@
 
 // 每个sink 实现要提供的操作集（vtable）
 struct sink_ops{
+    /* 渲染一帧 rgb（RGB24，共 size 字节）。
+     * 返回 0 = 继续，1 = 请求调用方停止（如用户关了显示窗口），
+     *      -1 = 参数非法或渲染失败。 */
     int (*render)(void *ctx, const void *rgb, size_t size);
     void (*destroy)(void *ctx);
 };
