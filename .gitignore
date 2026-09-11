@@ -1,2 +1,5 @@
 /build/
 /Testing/
+*.raw
+*.mp4
+photo_*.bmp

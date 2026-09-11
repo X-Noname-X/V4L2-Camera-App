@@ -4,6 +4,7 @@
 #include <stdlib.h>   // malloc / free
 #include <pthread.h>  // 互斥锁 / 条件变量
 #include <string.h>   // memcpy
+#include <stdatomic.h>// _Atomic，供跨线程读计数用
 #include <time.h>
 #include <errno.h>
 
@@ -16,6 +17,8 @@ struct frame_queue
     size_t head;       // 下一个要写入的"逻辑帧号"（单调递增，取模映射到槽位）
     size_t tail;       // 下一个要读出的"逻辑帧号"（队首）
     size_t count;      // 当前缓冲帧数，恒等于 head - tail，范围 [0,capacity]
+    _Atomic unsigned long pushed;   // 累计入队帧数：生产者一共送来多少
+    _Atomic unsigned long dropped;  // 其中因队列满被丢掉的
     pthread_mutex_t lock;
     pthread_cond_t not_empty;  // 队列由空变非空时，唤醒等待中的消费者
 };
@@ -39,6 +42,8 @@ frame_queue *fq_create(size_t capacity, size_t frame_size, fq_policy policy)
     fq->head = 0;
     fq->tail = 0;
     fq->count = 0;
+    atomic_store(&fq->pushed, 0);
+    atomic_store(&fq->dropped, 0);
 
     pthread_mutex_init(&fq->lock, NULL);  // 初始化一把互斥锁，用来保护共享数据，保证同一时刻只有一个线程能改它
     pthread_cond_init(&fq->not_empty, NULL);  // 初始化一个条件变量，用来让线程 等某个条件成立，以及 叫醒等待的线程
@@ -59,11 +64,27 @@ size_t fq_frame_size(const frame_queue *fq)
     return fq ? fq->frame_size : 0;
 }
 
+/* 统计计数：写在锁里（push 那条路径），读可能在别的线程（stats 走主线程），
+ * 所以用 _Atomic 读，避免跨线程读一个正在被改的普通变量。 */
+unsigned long fq_pushed(const frame_queue *fq)
+{
+    return fq ? atomic_load(&fq->pushed) : 0;
+}
+
+unsigned long fq_dropped(const frame_queue *fq)
+{
+    return fq ? atomic_load(&fq->dropped) : 0;
+}
+
 int fq_push(frame_queue *fq, const void *data, size_t size)
 {
     if (!fq || !data || size != fq->frame_size) return -1;
     pthread_mutex_lock(&fq->lock);
+    fq->pushed++;
     if (fq->count == fq->capacity) {
+        /* 满了。两种策略都得丢掉一帧：DROP_OLDEST 丢队首那帧，
+         * DROP_NEWEST 丢刚送来的这帧——无论哪种，净效果都是少了一帧。 */
+        fq->dropped++;
         switch (fq->policy)
         {
         case FQ_DROP_OLDEST:

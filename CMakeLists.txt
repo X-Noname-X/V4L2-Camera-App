@@ -15,6 +15,8 @@ find_package(SDL2 QUIET)   # SDL2：可选，用于窗口显示
 add_library(camera STATIC
     src/frame_queue.c
     src/decoder.c
+    src/recorder.c
+    src/stats.c
     src/sinks/sink_null.c
 )
 target_include_directories(camera PUBLIC include)
@@ -53,6 +55,12 @@ target_link_libraries(test_decoder PRIVATE camera)
 add_executable(test_sink tests/unit/test_sink.c)
 target_link_libraries(test_sink PRIVATE camera)
 
+add_executable(test_recorder tests/unit/test_recorder.c)
+target_link_libraries(test_recorder PRIVATE camera)
+
+add_executable(test_stats tests/unit/test_stats.c)
+target_link_libraries(test_stats PRIVATE camera)
+
 # 集成测试：真设备（需要一台摄像头）。这条会真的打开 /dev/video0 跑完整 V4L2
 # 路径，所以没有摄像头时它是失败而不是跳过——这是刻意的，它测的正是
 # 驱动协商、mmap、DQBUF/STREAMOFF 这些只有真硬件才能覆盖的地方。
@@ -65,6 +73,8 @@ target_link_libraries(test_capture PRIVATE camera)
 add_test(NAME frame_queue COMMAND test_frame_queue)
 add_test(NAME decoder COMMAND test_decoder)
 add_test(NAME sink COMMAND test_sink)
+add_test(NAME recorder COMMAND test_recorder)
+add_test(NAME stats COMMAND test_stats)
 add_test(NAME capture COMMAND test_capture)
 
 # cap 相关测试要开关摄像头、等帧、等线程 join，给足超时；

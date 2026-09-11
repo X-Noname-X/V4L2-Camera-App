@@ -38,4 +38,11 @@ int fq_pop(frame_queue *fq, void *out, size_t *size, int timeout_ms);
 /* 查询队列的帧大小（字节），供 cap_start 校验队列与采集格式是否匹配 */
 size_t fq_frame_size(const frame_queue *fq);
 
+/* 累计入队帧数：生产者一共送进来多少帧 */
+unsigned long fq_pushed(const frame_queue *fq);
+
+/* 其中因队列满被丢掉的帧数。丢帧率 ≈ dropped / pushed。
+ * 计数在锁内更新、原子读取，跨线程调用安全。 */
+unsigned long fq_dropped(const frame_queue *fq);
+
 #endif /* FRAME_QUEUE_H_ */

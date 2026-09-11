@@ -117,7 +117,41 @@ static void test_invalid_args(void)
     fq_destroy(q);
 }
 
-/* 7. 并发：生产者线程 + 主线程消费者 */
+/* 7. 统计计数：pushed / dropped（供 stats 算丢帧率） */
+static void test_counters(void)
+{
+    /* 传 NULL 返回 0 而不是崩 */
+    CHECK(fq_pushed(NULL) == 0);
+    CHECK(fq_dropped(NULL) == 0);
+
+    frame_queue *q = fq_create(2, sizeof(int), FQ_DROP_OLDEST);
+    CHECK(q != NULL);
+    CHECK(fq_pushed(q) == 0 && fq_dropped(q) == 0);   /* 新建时归零 */
+
+    int a = 1, b = 2, c = 3, d = 4;
+
+    /* 没满之前不该有丢帧 */
+    CHECK(fq_push(q, &a, sizeof(a)) == 0);
+    CHECK(fq_push(q, &b, sizeof(b)) == 0);
+    CHECK(fq_pushed(q) == 2);
+    CHECK(fq_dropped(q) == 0);
+
+    /* 满了之后每多送一帧就丢一帧：送 4 次共 2 次溢出 */
+    CHECK(fq_push(q, &c, sizeof(c)) == 0);
+    CHECK(fq_push(q, &d, sizeof(d)) == 0);
+    CHECK(fq_pushed(q) == 4);
+    CHECK(fq_dropped(q) == 2);
+
+    /* 参数不合法时在加锁前就返回了，不该被算进去 */
+    CHECK(fq_push(q, NULL, sizeof(a)) == -1);
+    CHECK(fq_push(q, &a, sizeof(a) + 1) == -1);
+    CHECK(fq_pushed(q) == 4);
+    CHECK(fq_dropped(q) == 2);   /* 仍是 2，那两次失败调用没被算进来 */
+
+    fq_destroy(q);
+}
+
+/* 8. 并发：生产者线程 + 主线程消费者 */
 static void *producer_thread(void *arg)
 {
     frame_queue *q = (frame_queue *)arg;
@@ -153,6 +187,7 @@ int main(void)
     test_drop_newest();
     test_empty_timeout();
     test_invalid_args();
+    test_counters();
     test_concurrent();
 
     printf("== %d 个断言, %d 个失败 ==\n", tests_run, tests_failed);
