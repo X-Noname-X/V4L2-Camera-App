@@ -1,63 +1,93 @@
-/* apps/main.c：把 采集 → 队列 → 解码 → 输出 串成完整程序。
- * 采集走真 V4L2（src/capture.c）；输出可选 SDL 窗口或 null，由命令行选项决定；
- * 可以同时录制原始帧到文件（--record）。
+/* open/O_EXCL/fdopen/close 都是 POSIX，不加这句编译器看不到声明，
+ * 会按隐式 int 调，指针被截断成 32 位 */
+#define _POSIX_C_SOURCE 200809L
+
+/* 采集 → 队列 → 解码 → 预览，可选把原始帧录到文件
  *
- * ./camera_app --help 看全部选项。常用：
- *   ./camera_app                              默认 sdl，显示到关窗口
- *   ./camera_app --frames=300 --sink=null     空跑 300 帧，不弹窗
- *   ./camera_app --record=rec.raw             一边显示一边录
- *   ./camera_app --device=/dev/video2         换一个摄像头 */
+ * 本仓库的演示程序，不是库的一部分，真正的产品（比如 LCD 上的显示）应该
+ * 只链接 libcamera.a，自己决定把数据送去哪里
+ *
+ * 用法见 --help */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <signal.h>
-#include <limits.h>   /* INT_MAX */
-#include <getopt.h>   /* getopt_long */
+#include <stdint.h>
+#include <limits.h>
+#include <time.h>
+#include <fcntl.h>    // open / O_EXCL
+#include <unistd.h>   // close
+#include <errno.h>
+#include <getopt.h>
+
 #include "camera/capture.h"
 #include "camera/frame_queue.h"
 #include "camera/decoder.h"
-#include "camera/sink.h"
-#include "camera/recorder.h"
-#include "camera/stats.h"
+#include "preview.h"
 
-/* null 模式没有窗口可关，只能靠信号停：收到后置标志，主循环下一轮退出。
- * sdl 模式不需要这套——SDL_Init 会自己装信号处理并投递 SDL_QUIT 事件。 */
-static volatile sig_atomic_t g_stop = 0;
+#define NS_PER_SEC 1000000000ULL
 
-static void on_signal(int sig)
+static uint64_t now_ns(void)
 {
-    (void)sig;
-    g_stop = 1;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);   // 单调时钟，不受系统时间被改影响
+    return (uint64_t)ts.tv_sec * NS_PER_SEC + (uint64_t)ts.tv_nsec;
 }
 
-/* 按名字创建 sink。名字不认识、或该 sink 没编进这次构建时，打印原因并返回 NULL */
-static frame_sink *make_sink(const char *name, unsigned width, unsigned height)
+/* 存一帧原始采集数据，MJPEG 的帧本身就是一张完整的 JPEG，直接落盘即可，
+ * 别的格式的帧不是 JPEG，存出来打不开，所以调用方要先判格式
+ * 文件名自动往后找空位，绝不覆盖已有文件 */
+static int save_photo(const char *prefix, const void *data, size_t size)
 {
-#ifndef HAVE_SDL2
-    (void)width;    /* 这个构建里只有 null sink，窗口尺寸用不上 */
-    (void)height;
-#endif
+    char path[128];
+    int fd;
 
-    if (strcmp(name, "null") == 0)
-        return sink_null_create();
-
-    if (strcmp(name, "sdl") == 0) {
-#ifdef HAVE_SDL2
-        return sink_sdl_create(width, height);
-#else
-        fprintf(stderr, "这个构建没有 SDL2，用不了 sdl sink（可改用 null）\n");
-        return NULL;
-#endif
+    for (int i = 1; ; i++) {
+        snprintf(path, sizeof(path), "%s_%04d.jpg", prefix, i);
+        /* O_EXCL 的语义正是「文件已存在就失败」，而且是原子的，
+         * 所以换多少次运行都不会覆盖之前拍的照片 */
+        fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+        if (fd >= 0) break;                    // 抢到了这个编号
+        if (errno != EEXIST) { perror("open"); return -1; }
     }
 
-    fprintf(stderr, "未知的 sink：%s（可选：sdl / null）\n", name);
-    return NULL;
+    FILE *fp = fdopen(fd, "wb");
+    if (!fp) {
+        perror("fdopen");
+        close(fd);
+        remove(path);
+        return -1;
+    }
+
+    if (fwrite(data, 1, size, fp) != size || fclose(fp) != 0) {
+        fprintf(stderr, "保存照片失败：%s\n", path);
+        remove(path);                          // 别留半截文件
+        return -1;
+    }
+
+    printf("已保存 %s（%zu 字节）\n", path, size);
+    return 0;
 }
 
-/* 解析一个「不小于 0 的整数」选项。失败打印原因并返回 -1。
- * 用 strtol 而不是 atoi：atoi 遇到乱输会静默返回 0，而 0 在这两个选项里
- * 都是合法值（不限帧数 / 不滚动输出）——打错一个字就变成了另一回事。 */
-static int parse_uint_arg(const char *arg, const char *what, int *out)
+static void usage(FILE *out, const char *prog)
+{
+    fprintf(out,
+        "用法：%s [选项]\n"
+        "  -d, --device=PATH  采集设备（默认 /dev/video0）\n"
+        "  -n, --frames=N     处理 N 帧后退出；0 = 不限（默认 0）\n"
+        "  -r, --record=PATH  把原始帧录到文件（可与预览同时进行）\n"
+        "  -f, --format=NAME  像素格式：mjpeg / yuyv / rgb24（默认 mjpeg）\n"
+        "  -s, --size=WxH     分辨率（默认 640x480）\n"
+        "  -h, --help         显示本帮助\n"
+        "\n"
+        "运行时：空格 = 存一张 photo_000N.jpg（仅 MJPEG），ESC 或关窗口 = 退出\n"
+        "\n"
+        "例：%s --frames=150 --record=rec.mjpg\n"
+        "    %s --format=yuyv --size=1280x720\n", prog, prog, prog);
+}
+
+/* 解析「不小于 0 的整数」选项，用 strtol 而不是 atoi：atoi 遇到乱输会
+ * 静默返回 0，而 0 恰好是「不限帧数」，打错一个字就变成跑个没完 */
+static int parse_uint(const char *arg, const char *what, int *out)
 {
     char *end;
     long v = strtol(arg, &end, 10);
@@ -69,70 +99,61 @@ static int parse_uint_arg(const char *arg, const char *what, int *out)
     return 0;
 }
 
-/* 录制文件是裸帧、没有头，转码时要显式告诉 ffmpeg 像素格式。
- * ffmpeg 的格式名和我们的枚举不是一回事（YUYV → yuyv422）。 */
-static const char *ffmpeg_pix_fmt(pixel_format fmt)
+static int parse_format(const char *arg, pixel_format *out)
 {
-    switch (fmt) {
-    case PIX_FMT_YUYV:  return "yuyv422";
-    case PIX_FMT_RGB24: return "rgb24";
-    default:            return NULL;   /* MJPEG 等变长格式不适用裸流 */
-    }
+    if (!strcmp(arg, "mjpeg")) *out = PIX_FMT_MJPEG;
+    else if (!strcmp(arg, "yuyv")) *out = PIX_FMT_YUYV;
+    else if (!strcmp(arg, "rgb24")) *out = PIX_FMT_RGB24;
+    else { fprintf(stderr, "未知格式：%s（mjpeg / yuyv / rgb24）\n", arg); return -1; }
+    return 0;
 }
 
-static void usage(FILE *out, const char *prog)
+/* 解析 "宽x高"，strtol 显式传了基数 10，所以不会被 0x 之类的当成十六进制 */
+static int parse_size(const char *arg, unsigned *w, unsigned *h)
 {
-    fprintf(out,
-        "用法：%s [选项]\n"
-        "  -n, --frames=N     处理 N 帧后退出；0 = 不限（默认 0）\n"
-        "  -d, --device=PATH  采集设备（默认 /dev/video0）\n"
-        "  -s, --sink=NAME    输出方式：sdl（开窗口，空格拍照）或 null（丢弃并计数）\n"
-        "                     默认 sdl；本次构建未编入 SDL2 时默认 null\n"
-        "  -r, --record=PATH  把原始帧录到文件（可与显示同时进行）\n"
-        "  -t, --stats=SEC    每 SEC 秒打印一行实时统计；0 = 只打收尾汇总（默认 0）\n"
-        "  -h, --help         显示本帮助\n"
-        "\n"
-        "例：%s --frames=300 --sink=null\n"
-        "    %s --record=rec.raw --stats=1 --frames=150\n", prog, prog, prog);
+    char *end;
+    long ww = strtol(arg, &end, 10);
+    if (*end != 'x' && *end != 'X') goto bad;
+    long hh = strtol(end + 1, &end, 10);
+    if (*end || ww <= 0 || hh <= 0 || ww > 65535 || hh > 65535) goto bad;
+    *w = (unsigned)ww;
+    *h = (unsigned)hh;
+    return 0;
+bad:
+    fprintf(stderr, "尺寸要写成 宽x高，如 640x480：%s\n", arg);
+    return -1;
 }
 
 int main(int argc, char **argv)
 {
     static const struct option long_opts[] = {
-        { "frames", required_argument, NULL, 'n' },
         { "device", required_argument, NULL, 'd' },
-        { "sink",   required_argument, NULL, 's' },
+        { "frames", required_argument, NULL, 'n' },
         { "record", required_argument, NULL, 'r' },
-        { "stats",  required_argument, NULL, 't' },
+        { "format", required_argument, NULL, 'f' },
+        { "size",   required_argument, NULL, 's' },
         { "help",   no_argument,       NULL, 'h' },
         { NULL, 0, NULL, 0 }
     };
 
-    int num_frames = 0;                 /* 0 = 不限帧数 */
-    int stats_sec  = 0;                 /* 0 = 不滚动输出，只在最后汇总 */
     const char *device = "/dev/video0";
-    const char *record_path = NULL;     /* NULL = 不录制 */
-#ifdef HAVE_SDL2
-    const char *sink_name = "sdl";
-#else
-    const char *sink_name = "null";
-#endif
+    const char *rec_path = NULL;        // NULL = 不录制
+    int num_frames = 0;                 // 0 = 不限
+    pixel_format fmt = PIX_FMT_MJPEG;
+    unsigned width = 640, height = 480;
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "n:d:s:r:t:h", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "d:n:r:f:s:h", long_opts, NULL)) != -1) {
         switch (opt) {
-        case 'n': if (parse_uint_arg(optarg, "帧数", &num_frames) != 0) return 1; break;
-        case 't': if (parse_uint_arg(optarg, "统计间隔（秒）", &stats_sec) != 0) return 1; break;
         case 'd': device = optarg; break;
-        case 's': sink_name = optarg; break;
-        case 'r': record_path = optarg; break;
+        case 'r': rec_path = optarg; break;
+        case 'n': if (parse_uint(optarg, "帧数", &num_frames) != 0) return 1; break;
+        case 'f': if (parse_format(optarg, &fmt) != 0) return 1; break;
+        case 's': if (parse_size(optarg, &width, &height) != 0) return 1; break;
         case 'h': usage(stdout, argv[0]); return 0;
         default:  usage(stderr, argv[0]); return 1;
         }
     }
-
-    /* 选项之外还有剩的，说明用了旧的位置参数写法（如 `camera_app 300`）。
-     * 不拦的话它会被静默忽略，帧数就悄悄变成默认的「不限」。 */
     if (optind < argc) {
         fprintf(stderr, "多余的参数：%s\n", argv[optind]);
         usage(stderr, argv[0]);
@@ -143,122 +164,105 @@ int main(int argc, char **argv)
     capture *cap = NULL;
     frame_queue *raw_q = NULL;
     decoder *dec = NULL;
-    frame_sink *sink = NULL;
-    recorder *rec = NULL;
-    stats *st = NULL;
+    preview *pv = NULL;
+    FILE *rec_fp = NULL;
     void *raw = NULL, *rgb = NULL;
-    int rc = 1;                                                 /* 默认为失败 */
+    int rc = 1;
 
-    /* 1. 采集：640x480 YUYV（驱动可能协商成别的，以 cap_* 查询为准） */
-    capture_config cfg = { device, PIX_FMT_YUYV, 640, 480, 4 };
+    /* 驱动可能协商成别的格式和尺寸，以 cap_* 查询到的为准 */
+    capture_config cfg = { device, fmt, width, height, 4 };
     cap = cap_create(&cfg);
     if (!cap) {
-        fprintf(stderr, "打开采集设备失败：%s（具体原因见上一行）\n"
-                        "常见原因：设备不存在、不是采集节点、"
-                        "被别的进程占用、当前用户不在 video 组\n", device);
+        fprintf(stderr, "打开采集设备失败：%s（具体原因见上一行）\n", device);
         goto out;
     }
 
-    /* 2. 原始帧队列（按协商出的一帧实际大小） */
-    size_t raw_size = cap_frame_size(cap);
-    raw_q = fq_create(8, raw_size, FQ_DROP_OLDEST);
+    /* MJPEG 每帧长度不定，所以槽按「驱动最多能写多少」来设，
+     * 而不是按某一帧的实际长度 */
+    size_t slot_size = cap_max_frame_size(cap);
+    raw_q = fq_create(8, slot_size, FQ_DROP_OLDEST);
     if (!raw_q) { fprintf(stderr, "创建队列失败\n"); goto out; }
 
-    /* 3. 解码器：YUYV → RGB24 */
     dec = decoder_create(cap_format(cap), cap_width(cap), cap_height(cap));
     if (!dec) { fprintf(stderr, "创建解码器失败\n"); goto out; }
     size_t rgb_size = decoder_output_size(dec);
 
-    /* 4. 输出：按参数选。窗口尺寸用协商出的宽高，否则画面会被拉伸 */
-    sink = make_sink(sink_name, cap_width(cap), cap_height(cap));
-    if (!sink) goto out;
+    pv = preview_open(cap_width(cap), cap_height(cap));
+    if (!pv) goto out;
 
-    if (strcmp(sink_name, "null") == 0) {
-        signal(SIGINT,  on_signal);
-        signal(SIGTERM, on_signal);
+    unsigned long rec_frames = 0;
+    if (rec_path) {
+        rec_fp = fopen(rec_path, "wb");
+        if (!rec_fp) { perror("fopen"); goto out; }
     }
 
-    st = stats_create();
-    if (!st) { fprintf(stderr, "创建统计失败\n"); goto out; }
-
-    printf("采集格式 %s %ux%u：原始 %zu 字节/帧，RGB %zu 字节/帧\n",
+    printf("采集 %s %ux%u：接收缓冲 %zu 字节，RGB %zu 字节/帧\n",
            pixel_format_name(cap_format(cap)), cap_width(cap), cap_height(cap),
-           raw_size, rgb_size);
-    printf("输出：%s sink%s\n", sink_name,
-           strcmp(sink_name, "sdl") == 0 ? "（空格拍照，ESC 或关窗口退出）"
-                                         : "（丢弃并计数，Ctrl+C 退出）");
+           slot_size, rgb_size);
+    printf("空格 = 拍照，ESC 或关窗口 = 退出\n");
 
-    /* 5. 录制（可选）：录的是采集到的原始帧，解码之前那一份 */
-    if (record_path) {
-        rec = rec_create(record_path);
-        if (!rec) { fprintf(stderr, "打开录制文件失败：%s\n", record_path); goto out; }
-        printf("录制：%s（原始帧直接落盘）\n", record_path);
-    }
-
-    /* 5. 起采集线程（生产端） */
+    /* 起采集线程，并分配两块循环复用的缓冲（热路径零 malloc） */
     if (cap_start(cap, raw_q) != 0) { fprintf(stderr, "启动采集失败\n"); goto out; }
-
-    /* 6. 帧缓冲：一次分配，循环复用（热路径零 malloc） */
-    raw = malloc(raw_size);
+    raw = malloc(slot_size);
     rgb = malloc(rgb_size);
     if (!raw || !rgb) { fprintf(stderr, "分配帧缓冲失败\n"); goto out; }
 
-    /* 8. 主循环（消费端）：pop 原始帧 →（录制）→ 解码 → 输出
-     * 同一帧先落盘再解码：录制要的是原始数据，跟显示互不干扰。 */
-    int got = 0;
-    for (int i = 0; (num_frames == 0 || i < num_frames) && !g_stop; i++) {
-        size_t sz = raw_size;
-        if (fq_pop(raw_q, raw, &sz, 1000) != 0) break;   /* 超时/队列空 → 退出 */
+    uint64_t t0 = now_ns();
+    int got = 0, quit = 0;
 
-        /* 录制失败（磁盘满等）不该打断显示：停掉录制，画面继续 */
-        if (rec && rec_write(rec, raw, sz) != 0) {
-            fprintf(stderr, "录制中断，继续显示但不再录制\n");
-            rec_destroy(rec);
-            rec = NULL;
+    /* i 是「取了多少帧」的循环计数，不是 got：解码失败的帧也要算进去，
+     * 否则画面一直解不开时这个循环永远退不出来 */
+    for (int i = 0; !quit && (num_frames == 0 || i < num_frames); i++) {
+        size_t sz = slot_size;
+        if (fq_pop(raw_q, raw, &sz, 1000) != 0) break;   // 超时/队列空 → 退出
+
+        /* 录像失败（磁盘满等）不打断预览：停掉录制，画面继续 */
+        if (rec_fp) {
+            if (fwrite(raw, 1, sz, rec_fp) == sz) {
+                rec_frames++;
+            } else {
+                fprintf(stderr, "录制中断，继续预览但不再录制\n");
+                fclose(rec_fp);
+                rec_fp = NULL;
+            }
         }
 
         if (decoder_decode(dec, raw, sz, rgb, rgb_size) != 0) continue;
 
-        int r = sink_render(sink, rgb, rgb_size);
-        if (r == 1) { printf("窗口已关闭，退出\n"); break; }   /* 用户主动退出 */
-        if (r < 0)  { fprintf(stderr, "渲染第 %d 帧失败\n", got + 1); break; }
+        preview_action action = preview_show(pv, rgb);
+        if (action == PREVIEW_QUIT) { quit = 1; break; }
+
+        /* 只有 MJPEG 的帧本身是完整 JPEG，别的格式直接落盘会得到一个
+         * 名字叫 .jpg 但内容不是 JPEG 的坏文件，所以这里拦住 */
+        if (action == PREVIEW_SNAPSHOT) {
+            if (cap_format(cap) == PIX_FMT_MJPEG)
+                save_photo("photo", raw, sz);
+            else
+                fprintf(stderr, "当前是 %s，只有 MJPEG 能直接存成 .jpg\n",
+                        pixel_format_name(cap_format(cap)));
+        }
         got++;
-
-        /* 这一帧确实走完整条链路了，才记进统计 */
-        uint64_t now = stats_now_ns();
-        stats_tick(st, now, fq_dropped(raw_q));
-        stats_report(st, now, stats_sec * 1000);
     }
-    if (g_stop) printf("收到中断信号，退出\n");
-    printf("完成：%d 帧\n", got);
-    stats_summary(st, stats_now_ns());
 
-    /* 录制收尾：报大小，并给出转成能直接播的 mp4 的命令。
-     * 裸帧文件没有头，ffmpeg 只能靠命令行参数知道格式和宽高。 */
-    if (rec) {
-        const char *pf = ffmpeg_pix_fmt(cap_format(cap));
-        printf("录制：%lu 帧，%.1f MB\n",
-               rec_frame_count(rec), rec_bytes_written(rec) / (1024.0 * 1024.0));
-        if (pf)
-            printf("  转成可播放的 mp4：\n"
-                   "  ffmpeg -f rawvideo -pix_fmt %s -s %ux%u -i %s out.mp4\n",
-                   pf, cap_width(cap), cap_height(cap), record_path);
-        else
-            printf("  （%s 是变长格式，套用上面的命令需另行指定参数）\n",
-                   pixel_format_name(cap_format(cap)));
-    }
+    double secs = (double)(now_ns() - t0) / (double)NS_PER_SEC;
+    unsigned long dropped = fq_dropped(raw_q);
+    unsigned long total = (unsigned long)got + dropped;
+    printf("完成：%d 帧，平均 %.1f fps，丢帧 %lu（%.1f%%）\n",
+           got, secs > 0.0 ? (double)got / secs : 0.0,
+           dropped, total ? 100.0 * (double)dropped / (double)total : 0.0);
+    if (rec_fp)
+        printf("录制：%s，%lu 帧\n", rec_path, rec_frames);
     rc = 0;
 
 out:
-    /* 9. 逆序清理。每项都判空、都幂等，从任何一步跳进来都安全 */
+    /* 逆序清理，每项都判空、都幂等，从任何一步跳进来都安全 */
     free(raw);
     free(rgb);
-    if (cap)   cap_stop(cap);        /* 幂等：未在运行直接返回 */
-    if (st)    stats_destroy(st);
-    if (rec)   rec_destroy(rec);
-    if (sink)  sink_destroy(sink);
-    if (dec)   decoder_destroy(dec);
+    if (cap) cap_stop(cap);          // 幂等：未在运行直接返回
+    if (rec_fp) fclose(rec_fp);
+    if (pv) preview_close(pv);
+    if (dec) decoder_destroy(dec);
     if (raw_q) fq_destroy(raw_q);
-    if (cap)   cap_destroy(cap);
+    if (cap) cap_destroy(cap);
     return rc;
 }

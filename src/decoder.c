@@ -1,15 +1,15 @@
 #include "camera/decoder.h"
 
-#include <stdlib.h>   /* malloc / free */
-#include <string.h>   /* memcpy */
-#include <stdint.h>   /* uint8_t */
+#include <stdlib.h>   // malloc / free
+#include <string.h>   // memcpy
+#include <stdint.h>   // uint8_t
 
-/* MJPEG 依赖 libjpeg(-turbo)；CMake 找到该库时定义 HAVE_LIBJPEG */
-#ifdef HAVE_LIBJPEG
-#include <stdio.h>    /* jpeglib.h 用到 FILE，需先包含 */
+/* MJPEG 依赖 libjpeg 的 API（jpeglib.h / jpeg_*），发行版装的几乎都是
+ * libjpeg-turbo，它与 IJG 原版在 API/ABI 上兼容，所以找到哪个都行
+ * 注意别跟 TurboJPEG API（turbojpeg.h）混为一谈：那是另一套高层封装 */
+#include <stdio.h>    // jpeglib.h 用到 FILE，必须先包含
 #include <jpeglib.h>
 #include <setjmp.h>
-#endif
 
 struct decoder {
     pixel_format fmt;
@@ -32,9 +32,6 @@ decoder *decoder_create(pixel_format fmt, unsigned width, unsigned height)
     decoder *d;
 
     if (width == 0 || height == 0) return NULL;
-#ifndef HAVE_LIBJPEG
-    if (fmt == PIX_FMT_MJPEG) return NULL;   /* 未编译 libjpeg，MJPEG 不可用 */
-#endif
 
     d = malloc(sizeof(*d));
     if (!d) return NULL;
@@ -54,7 +51,7 @@ size_t decoder_output_size(const decoder *d)
     return d ? (size_t)d->width * d->height * 3 : 0;
 }
 
-/* 把整数结果截回 [0,255]（BT.601 定点运算可能溢出） */
+// 把整数截回 [0,255]（BT.601 定点运算会溢出）
 static int clamp_byte(int v)
 {
     if (v < 0)   return 0;
@@ -62,14 +59,14 @@ static int clamp_byte(int v)
     return v;
 }
 
-/* YUYV → RGB24。BT.601 全范围整数变换，避免浮点。
- * YUYV 每 4 字节 = 相邻 2 像素（Y0 U Y1 V），要求 width 为偶数（V4L2 下恒成立）。 */
+/* YUYV → RGB24，BT.601 全范围整数变换，避免浮点
+ * YUYV 每 4 字节 = 相邻 2 像素（Y0 U Y1 V），要求 width 为偶数（V4L2 下恒成立） */
 static int yuyv_to_rgb24(const uint8_t *src, size_t src_size, unsigned width,
                          unsigned height, uint8_t *dst, size_t dst_size)
 {
     size_t npix = (size_t)width * height;
 
-    if (src_size < npix * 2) return -1;   /* YUYV 每像素 2 字节 */
+    if (src_size < npix * 2) return -1;   // YUYV 每像素 2 字节
     if (dst_size < npix * 3) return -1;
 
     for (size_t i = 0; i < npix; i += 2) {
@@ -90,11 +87,9 @@ static int yuyv_to_rgb24(const uint8_t *src, size_t src_size, unsigned width,
     return 0;
 }
 
-#ifdef HAVE_LIBJPEG
-
-/* libjpeg 默认出错直接 exit()，对库是致命的；换成 setjmp 兜底返回错误码 */
+/* libjpeg 默认出错直接 exit()，对库是致命的，换成 setjmp 兜底返回错误码 */
 struct jerr_mgr {
-    struct jpeg_error_mgr pub;   /* 必须是第一个成员 */
+    struct jpeg_error_mgr pub;   // 必须是第一个成员
     jmp_buf jmp;
 };
 
@@ -102,10 +97,10 @@ static void jerr_exit(j_common_ptr cinfo)
 {
     struct jerr_mgr *e = (struct jerr_mgr *)cinfo->err;
     (*cinfo->err->output_message)(cinfo);
-    longjmp(e->jmp, 1);          /* 跳回 setjmp 处 */
+    longjmp(e->jmp, 1);          // 跳回 setjmp 处
 }
 
-/* MJPEG → RGB24：内存解码，不落盘 */
+/* MJPEG → RGB24，内存解码，不落盘 */
 static int mjpeg_to_rgb24(const uint8_t *src, size_t src_size, unsigned width,
                           unsigned height, uint8_t *dst, size_t dst_size)
 {
@@ -116,18 +111,18 @@ static int mjpeg_to_rgb24(const uint8_t *src, size_t src_size, unsigned width,
 
     cinfo.err = jpeg_std_error(&jerr.pub);
     jerr.pub.error_exit = jerr_exit;
-    if (setjmp(jerr.jmp)) goto out;   /* 解压中出错，跳到清理 */
+    if (setjmp(jerr.jmp)) goto out;   // 解压中出错，跳到清理
 
     jpeg_create_decompress(&cinfo);
     created = 1;
     jpeg_mem_src(&cinfo, (unsigned char *)src, (unsigned long)src_size);
     if (jpeg_read_header(&cinfo, TRUE) != JPEG_HEADER_OK) goto out;
 
-    /* 分辨率必须与采集端协商的一致，否则直接判失败 */
+    // 分辨率必须与采集端协商的一致，否则直接判失败
     if (cinfo.image_width != width || cinfo.image_height != height) goto out;
     if (dst_size < (size_t)width * height * 3) goto out;
 
-    cinfo.out_color_space = JCS_RGB;   /* 输出 3 字节 RGB */
+    cinfo.out_color_space = JCS_RGB;   // 输出 3 字节 RGB
     jpeg_start_decompress(&cinfo);
     while (cinfo.output_scanline < cinfo.output_height) {
         unsigned char *rowptr[1] = { row };
@@ -142,8 +137,6 @@ out:
     return rc;
 }
 
-#endif /* HAVE_LIBJPEG */
-
 int decoder_decode(decoder *d, const void *src, size_t src_size,
                    void *dst, size_t dst_size)
 {
@@ -153,11 +146,7 @@ int decoder_decode(decoder *d, const void *src, size_t src_size,
     case PIX_FMT_YUYV:
         return yuyv_to_rgb24(src, src_size, d->width, d->height, dst, dst_size);
     case PIX_FMT_MJPEG:
-#ifdef HAVE_LIBJPEG
         return mjpeg_to_rgb24(src, src_size, d->width, d->height, dst, dst_size);
-#else
-        return -1;   /* 编译时未启用 MJPEG */
-#endif
     case PIX_FMT_RGB24:
         if (src_size > dst_size) return -1;
         memcpy(dst, src, src_size);
