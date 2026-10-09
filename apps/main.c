@@ -166,7 +166,7 @@ int main(int argc, char **argv)
     decoder *dec = NULL;
     preview *pv = NULL;
     FILE *rec_fp = NULL;
-    void *raw = NULL, *rgb = NULL;
+    void *raw = NULL, *frame = NULL;
     int rc = 1;
 
     /* 驱动可能协商成别的格式和尺寸，以 cap_* 查询到的为准 */
@@ -185,7 +185,7 @@ int main(int argc, char **argv)
 
     dec = decoder_create(cap_format(cap), cap_width(cap), cap_height(cap));
     if (!dec) { fprintf(stderr, "创建解码器失败\n"); goto out; }
-    size_t rgb_size = decoder_output_size(dec);
+    size_t frame_size = decoder_output_size(dec);
 
     pv = preview_open(cap_width(cap), cap_height(cap));
     if (!pv) goto out;
@@ -196,16 +196,16 @@ int main(int argc, char **argv)
         if (!rec_fp) { perror("fopen"); goto out; }
     }
 
-    printf("采集 %s %ux%u：接收缓冲 %zu 字节，RGB %zu 字节/帧\n",
+    printf("采集 %s %ux%u：接收缓冲 %zu 字节，RGB565 %zu 字节/帧\n",
            pixel_format_name(cap_format(cap)), cap_width(cap), cap_height(cap),
-           slot_size, rgb_size);
+           slot_size, frame_size);
     printf("空格 = 拍照，ESC 或关窗口 = 退出\n");
 
     /* 起采集线程，并分配两块循环复用的缓冲（热路径零 malloc） */
     if (cap_start(cap, raw_q) != 0) { fprintf(stderr, "启动采集失败\n"); goto out; }
     raw = malloc(slot_size);
-    rgb = malloc(rgb_size);
-    if (!raw || !rgb) { fprintf(stderr, "分配帧缓冲失败\n"); goto out; }
+    frame = malloc(frame_size);
+    if (!raw || !frame) { fprintf(stderr, "分配帧缓冲失败\n"); goto out; }
 
     uint64_t t0 = now_ns();
     int got = 0, quit = 0;
@@ -227,9 +227,9 @@ int main(int argc, char **argv)
             }
         }
 
-        if (decoder_decode(dec, raw, sz, rgb, rgb_size) != 0) continue;
+        if (decoder_decode(dec, raw, sz, frame, frame_size) != 0) continue;
 
-        preview_action action = preview_show(pv, rgb);
+        preview_action action = preview_show(pv, frame);
         if (action == PREVIEW_QUIT) { quit = 1; break; }
 
         /* 只有 MJPEG 的帧本身是完整 JPEG，别的格式直接落盘会得到一个
@@ -257,7 +257,7 @@ int main(int argc, char **argv)
 out:
     /* 逆序清理，每项都判空、都幂等，从任何一步跳进来都安全 */
     free(raw);
-    free(rgb);
+    free(frame);
     if (cap) cap_stop(cap);          // 幂等：未在运行直接返回
     if (rec_fp) fclose(rec_fp);
     if (pv) preview_close(pv);

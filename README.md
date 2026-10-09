@@ -1,6 +1,6 @@
 # V4L2-Camera-App
 
-多线程 V4L2 摄像头采集库 + 一个演示程序。零拷贝 mmap 采集、有界环形缓冲解耦采集与消费、MJPEG/YUYV/RGB24 解码。
+多线程 V4L2 摄像头采集库 + 一个演示程序。零拷贝 mmap 采集、有界环形缓冲解耦采集与消费、MJPEG/YUYV/RGB24 三种输入统一解码成 RGB565。
 
 ## 目录结构
 
@@ -11,13 +11,15 @@ apps/             main.c  preview.c                      ← 演示程序
 tests/            integration/test_capture.c             ← 真设备集成测试
 ```
 
-**库和应用分得很开。** `libcamera.a` 只放能被别的程序复用的东西——采集、队列、解码，**一行显示代码都没有**。真正的产品（比如跑在 LCD 上的那个）链接这个库，拿到 RGB24 之后自己决定怎么画到屏幕上。
+**库和应用分得很开。** `libcamera.a` 只放能被别的程序复用的东西——采集、队列、解码，**一行显示代码都没有**。真正的产品（比如跑在 LCD 上的那个）链接这个库，拿到 RGB565 之后自己决定怎么画到屏幕上。
+
+解码输出固定 RGB565（16bpp），这是显示侧的通用格式，交给调用方时不必再转一遍。用 libjpeg-turbo 的 `JCS_RGB565` 直出，色彩转换在库内部走 NEON。
 
 `apps/preview.c` 只是本仓库「看得见画面」用的调试窗口，不是库的一部分。等 LCD 那边能跑了，它可以整个删掉。
 
 ## 编译
 
-依赖：`libjpeg`、`SDL2`、`pthread`
+依赖：`libjpeg-turbo`（RGB565 直出用的 `JCS_RGB565` 是它的扩展，IJG 原版编不过）、`SDL2`、`pthread`
 
 ```bash
 mkdir build && cd build

@@ -3,17 +3,17 @@
 
 #include <stddef.h>   // size_t
 
-/* 像素格式：V4L2 采集端输出的原始帧格式，解码器统一转成 RGB24 */
+/* 像素格式：V4L2 采集端输出的原始帧格式。解码器统一输出 RGB565 */
 typedef enum {
     PIX_FMT_YUYV,   // YUYV 4:2:2 交错打包，绝大多数 UVC 摄像头默认格式
     PIX_FMT_MJPEG,  // JPEG 压缩帧，解它要用 libjpeg
-    PIX_FMT_RGB24,  // 已是 RGB24，直通复制
+    PIX_FMT_RGB24,  // 输入已是 RGB24，打包成 RGB565
 } pixel_format;
 
 /* 不透明类型：内部结构只在 decoder.c 定义 */
 typedef struct decoder decoder;
 
-/* 创建解码器，输出固定为 RGB24（width*height*3 字节）
+/* 创建解码器，输出固定为 RGB565（width*height*2 字节）
  * fmt/width/height 必须与采集端协商出的值一致
  * 成功返回解码器指针，失败返回 NULL */
 decoder *decoder_create(pixel_format fmt, unsigned width, unsigned height);
@@ -21,14 +21,30 @@ decoder *decoder_create(pixel_format fmt, unsigned width, unsigned height);
 /* 释放解码器 */
 void decoder_destroy(decoder *d);
 
-/* 将一帧 src 解码为 RGB24 写入 dst
+/* 将一帧 src 解码为 RGB565 写入 dst
  *   src/src_size : 输入帧数据及其字节数（YUYV 应为 width*height*2）
- *   dst/dst_size : 输出缓冲及其容量（至少 width*height*3）
+ *   dst/dst_size : 输出缓冲及其容量（至少 width*height*2）
  * 成功返回 0，失败返回 -1（参数非法 / 数据损坏 / 缓冲不足） */
 int decoder_decode(decoder *d, const void *src, size_t src_size,
                    void *dst, size_t dst_size);
 
-/* 解码后一帧 RGB24 的字节数 = width*height*3 */
+/* 把内存里一张独立 JPEG 解码成 RGB565，尺寸由文件头决定。
+ * 与 decoder_decode 的唯一区别是「尺寸从哪来」：照片是当初拍下的，
+ * 尺寸事先不知道，而 decoder_create 要求预先声明。
+ *   dst/dst_size : 输出缓冲。容量不够直接失败，所以先用 decoder_jpeg_size
+ *                  问出尺寸、按 w*h*2 精确分配，别按最坏情况猜
+ *   out_w/out_h  : 非 NULL 时写回实际解码尺寸
+ * 成功返回 0，失败返回 -1（数据损坏 / 容量不足） */
+int decoder_decode_jpeg(const void *src, size_t src_size,
+                        void *dst, size_t dst_size,
+                        unsigned *out_w, unsigned *out_h);
+
+/* 只读 JPEG 头拿尺寸，不解码。配合 decoder_decode_jpeg 精确分配输出缓冲。
+ * 成功返回 0，失败返回 -1 */
+int decoder_jpeg_size(const void *src, size_t src_size,
+                      unsigned *out_w, unsigned *out_h);
+
+/* 解码后一帧 RGB565 的字节数 = width*height*2 */
 size_t decoder_output_size(const decoder *d);
 
 /* 像素格式的可读名字（日志用） */

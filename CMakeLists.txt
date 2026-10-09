@@ -6,7 +6,9 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 add_compile_options(-Wall -Wextra)
 
 find_package(Threads REQUIRED)
-find_package(JPEG  REQUIRED)   # MJPEG 解码（decoder.c）+ 存 JPEG（apps/save_jpg.c）
+# MJPEG 解码（decoder.c）用的 JCS_RGB565 是 libjpeg-turbo 的扩展，
+# 发行版的 libjpeg-dev 装的都是它；换成 IJG 原版会编不过
+find_package(JPEG  REQUIRED)
 find_package(SDL2  REQUIRED)   # 本地预览窗口（apps/preview.c）
 
 # 库：采集 + 队列 + 解码。别人链接这个就够（比如 LCD 上的显示程序）。

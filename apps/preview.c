@@ -58,8 +58,8 @@ preview *preview_open(unsigned width, unsigned height)
     }
 
     /* STREAMING 声明这块纹理会被整帧反复重写，让 SDL 选合适的存放方式
-     * SDL_PIXELFORMAT_RGB24 的内存字节序正是 R,G,B，与 decoder 的输出一致 */
-    pv->tex = SDL_CreateTexture(pv->ren, SDL_PIXELFORMAT_RGB24,
+     * SDL_PIXELFORMAT_RGB565 的内存布局与 decoder 的输出一致 */
+    pv->tex = SDL_CreateTexture(pv->ren, SDL_PIXELFORMAT_RGB565,
                                 SDL_TEXTUREACCESS_STREAMING,
                                 (int)width, (int)height);
     if (!pv->tex) {
@@ -74,12 +74,12 @@ fail:
     return NULL;
 }
 
-preview_action preview_show(preview *pv, const void *rgb)
+preview_action preview_show(preview *pv, const void *frame)
 {
     SDL_Event ev;
     preview_action action = PREVIEW_CONTINUE;
 
-    if (!pv || !rgb) return PREVIEW_QUIT;
+    if (!pv || !frame) return PREVIEW_QUIT;
 
     /* 必须抽空事件队列，不抽窗口会变成「无响应」，点关闭按钮也没反应 */
     while (SDL_PollEvent(&ev)) {
@@ -95,8 +95,8 @@ preview_action preview_show(preview *pv, const void *rgb)
     }
     if (action == PREVIEW_QUIT) return action;
 
-    /* 整帧上传，pitch = 每行字节数；RGB24 紧密排列行间无填充，就是 宽*3 */
-    if (SDL_UpdateTexture(pv->tex, NULL, rgb, (int)pv->width * 3) != 0) {
+    /* 整帧上传，pitch = 每行字节数；RGB565 紧密排列行间无填充，就是 宽*2 */
+    if (SDL_UpdateTexture(pv->tex, NULL, frame, (int)pv->width * 2) != 0) {
         fprintf(stderr, "SDL_UpdateTexture 失败: %s\n", SDL_GetError());
         return PREVIEW_QUIT;
     }
