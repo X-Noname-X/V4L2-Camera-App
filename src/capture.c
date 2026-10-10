@@ -233,7 +233,7 @@ void cap_stop(capture *cap)
 {
     enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
-    if (!cap || !cap->running) return;   // 未在运行，幂等返回
+    if (!cap || !cap->running) return;   // 已经停了就直接返回，重复调用没关系
     /* 先停流：让阻塞中的 DQBUF 立即返回错误，线程随之退出 */
     xioctl(cap->fd, VIDIOC_STREAMOFF, &type, "VIDIOC_STREAMOFF");
     pthread_join(cap->thread, NULL);

@@ -33,7 +33,7 @@ static uint64_t now_ns(void)
     return (uint64_t)ts.tv_sec * NS_PER_SEC + (uint64_t)ts.tv_nsec;
 }
 
-/* 存一帧原始采集数据，MJPEG 的帧本身就是一张完整的 JPEG，直接落盘即可，
+/* 存一帧原始采集数据，MJPEG 的帧本身就是一张完整的 JPEG，直接写文件就行，
  * 别的格式的帧不是 JPEG，存出来打不开，所以调用方要先判格式
  * 文件名自动往后找空位，绝不覆盖已有文件 */
 static int save_photo(const char *prefix, const void *data, size_t size)
@@ -232,7 +232,7 @@ int main(int argc, char **argv)
         preview_action action = preview_show(pv, frame);
         if (action == PREVIEW_QUIT) { quit = 1; break; }
 
-        /* 只有 MJPEG 的帧本身是完整 JPEG，别的格式直接落盘会得到一个
+        /* 只有 MJPEG 的帧本身是完整 JPEG，别的格式直接写成文件会得到一个
          * 名字叫 .jpg 但内容不是 JPEG 的坏文件，所以这里拦住 */
         if (action == PREVIEW_SNAPSHOT) {
             if (cap_format(cap) == PIX_FMT_MJPEG)
@@ -255,10 +255,10 @@ int main(int argc, char **argv)
     rc = 0;
 
 out:
-    /* 逆序清理，每项都判空、都幂等，从任何一步跳进来都安全 */
+    /* 逆序清理，每项都判空、都可重复调用，从任何一步跳进来都安全 */
     free(raw);
     free(frame);
-    if (cap) cap_stop(cap);          // 幂等：未在运行直接返回
+    if (cap) cap_stop(cap);          // 可重复调用：未在运行直接返回
     if (rec_fp) fclose(rec_fp);
     if (pv) preview_close(pv);
     if (dec) decoder_destroy(dec);

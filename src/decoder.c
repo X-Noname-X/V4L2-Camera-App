@@ -3,10 +3,10 @@
 #include <stdlib.h>   // malloc / free
 #include <stdint.h>   // uint8_t / uint16_t
 
-/* MJPEG 依赖 libjpeg 的 API（jpeglib.h / jpeg_*）。
+/* MJPEG 依赖 libjpeg 的 API（jpeglib.h / jpeg_*）
  *
- * 本文件要求 libjpeg-turbo：RGB565 直出用的是它的 JCS_RGB565 扩展，
- * IJG 原版没有这个枚举，编不过——这是故意的，编不过比悄悄出花屏好。
+ * 本文件要求 libjpeg-turbo：直接输出 RGB565 靠它的 JCS_RGB565 扩展，
+ * IJG 原版没有这个枚举，编不过
  * 另外别跟 TurboJPEG API（turbojpeg.h）混为一谈：那是另一套高层封装 */
 #include <stdio.h>    // jpeglib.h 用到 FILE，必须先包含
 #include <jpeglib.h>
@@ -110,7 +110,7 @@ static void jerr_exit(j_common_ptr cinfo)
     longjmp(e->jmp, 1);          // 跳回 setjmp 处
 }
 
-/* JPEG → RGB565，内存解码，不落盘。
+/* JPEG → RGB565，只在内存里解码，不写文件。
  *
  * expect_w/expect_h 非 0 时要求文件尺寸与之完全一致——摄像头场景用这个：
  * 大小帧混进来会让后续按声明尺寸推算的缓冲、缩放表全部错位。
@@ -197,6 +197,8 @@ int decoder_decode(decoder *d, const void *src, size_t src_size,
     }
 }
 
+// 解一整张独立 JPEG，decoder_decode()是解码一路摄像头流
+// decoder_decode_jpeg() 和 decoder_jpeg_size() 用于相册
 int decoder_decode_jpeg(const void *src, size_t src_size,
                         void *dst, size_t dst_size,
                         unsigned *out_w, unsigned *out_h)
@@ -206,6 +208,7 @@ int decoder_decode_jpeg(const void *src, size_t src_size,
     return jpeg_to_rgb565(src, src_size, 0, 0, dst, dst_size, out_w, out_h);
 }
 
+// 只看尺寸，不解码：读一遍 JPEG 头
 int decoder_jpeg_size(const void *src, size_t src_size,
                       unsigned *out_w, unsigned *out_h)
 {
